@@ -60,7 +60,7 @@
       <button id="startBtn">Connect &amp; Start test</button>
       <button id="stopBtn" class="secondary" disabled>Stop</button>
       <select id="mode">
-        <option value="full">Full test (2.5 min)</option>
+        <option value="full">Standard test (90 s)</option>
         <option value="quick">Quick test (30 s)</option>
       </select>
     </div>
@@ -88,12 +88,15 @@
 
   <div class="panel hidden" id="subjPanel">
     <div class="form-grid">
+      <div><label>Posture</label><select id="posture"><option value="lying">lying</option><option value="seated">seated</option><option value="standing">standing</option></select></div>
       <div><label>Sleep hours</label><input id="sleepH" type="number" step="0.5" min="0" max="24" placeholder="7.5"></div>
       <div><label>Sleep quality 1-5</label><input id="sleepQ" type="number" min="1" max="5"></div>
       <div><label>Soreness 1-5 (1 none)</label><input id="sore" type="number" min="1" max="5"></div>
       <div><label>Feeling 1-5</label><input id="feel" type="number" min="1" max="5"></div>
       <div><label>Readiness 1-5 (gut feel)</label><input id="ready" type="number" min="1" max="5"></div>
-      <div><label>Notes</label><input id="notes" type="text" placeholder="optional"></div>
+      <div><label>Morpheus HRV</label><input id="morphHrv" type="number" min="0" max="150" placeholder="from app"></div>
+      <div><label>Morpheus recovery %</label><input id="morphRec" type="number" min="0" max="100" placeholder="from app"></div>
+      <div style="grid-column:1/3"><label>Notes (e.g. which Morpheus account)</label><input id="notes" type="text" placeholder="optional"></div>
     </div>
     <div class="row" style="margin-top:12px"><button id="saveBtn">Save reading &amp; score</button></div>
     <div class="note">Enter readiness on gut feel — it's kept out of the score, as a validation target.</div>
@@ -258,7 +261,7 @@ function renderChart(){
 async function start(){
   if(!navigator.bluetooth){ $("status").textContent="No Web Bluetooth here. Use Chrome on Mac/Android, or open this link in the Bluefy app on iPhone."; return; }
   const quick = $("mode").value==="quick";
-  const settleMax = quick?10:40, measure = quick?30:150;
+  const settleMax = quick?10:40, measure = quick?30:90;
   const sMin= quick?3:5, win= quick?8:10, band=5;
   const total = settleMax+measure;
   try{
@@ -311,6 +314,7 @@ async function finish(settleMax,measure,sMin,win,band){
   const m=computeMetrics(hrM,rrM);
   if(m.error){ $("status").textContent="Reading unusable: "+m.error+". Re-run with good contact."; return; }
   lastMetrics=m;
+  m.settle_s=Math.round(settle); m.duration_s=measure;
   $("mRhr").textContent=m.rhr; $("mHrv").textContent=m.hrv; $("mRmssd").textContent=m.rmssd;
   $("mSdnn").textContent=m.sdnn; $("mBeats").textContent=m.clean+"/"+m.total; $("mQual").textContent=m.quality;
   $("qualNote").textContent=`HR settled at ~${Math.round(settle)}s. Artifacts ${m.artifactPct}%, synthetic ${m.synthPct}%.`;
@@ -330,10 +334,18 @@ function saveReading(){
   const histLn=hist.map(r=>r.ln).filter(x=>x!=null);
   const histRhr=hist.map(r=>r.rhr).filter(x=>x!=null);
   const sc=score(lastMetrics.ln,lastMetrics.rhr,histLn,histRhr,s);
-  const rec={date:new Date().toISOString().slice(0,10), strap:device?.name||"", ln:lastMetrics.ln,
-    hrv:lastMetrics.hrv, rhr:lastMetrics.rhr, rmssd:lastMetrics.rmssd, sdnn:lastMetrics.sdnn,
+  const rec={date:new Date().toISOString().slice(0,10),
+    time:new Date().toTimeString().slice(0,5),
+    posture:$("posture").value, strap:device?.name||"",
+    settle_s:lastMetrics.settle_s, duration_s:lastMetrics.duration_s,
+    ln:lastMetrics.ln, hrv:lastMetrics.hrv, rhr:lastMetrics.rhr,
+    rmssd:lastMetrics.rmssd, sdnn:lastMetrics.sdnn,
+    rr_total:lastMetrics.total, rr_clean:lastMetrics.clean,
+    artifact_pct:lastMetrics.artifactPct, synthetic_pct:lastMetrics.synthPct,
+    quality:lastMetrics.quality,
     sleep_hours:s.sleepH, sleep_quality:s.sleepQ, soreness:s.sore, feeling:s.feel,
-    readiness:g("ready"), notes:$("notes").value.trim(), score:sc?sc.score:null};
+    readiness:g("ready"), morpheus_hrv:g("morphHrv"), morpheus_recovery:g("morphRec"),
+    notes:$("notes").value.trim(), score:sc?sc.score:null};
   hist.push(rec); saveHist(hist); renderHist();
   $("scorePanel").classList.remove("hidden");
   if(sc){
@@ -345,16 +357,26 @@ function saveReading(){
     $("scoreBreak").textContent=`Baseline building (${histLn.length}/${BASE_MIN}). HRV logged; score appears once there's enough history.`;
   }
   $("subjPanel").classList.add("hidden");
-  ["sleepH","sleepQ","sore","feel","ready","notes"].forEach(id=>$(id).value="");
+  ["sleepH","sleepQ","sore","feel","ready","notes","morphHrv","morphRec"].forEach(id=>$(id).value="");
+  $("posture").value="lying";
 }
 
 function exportCSV(){
   const h=loadHist(); if(!h.length){return;}
-  const cols=["date","strap","ln","hrv","rhr","rmssd","sdnn","sleep_hours","sleep_quality","soreness","feeling","readiness","score","notes"];
-  const lines=[cols.join(",")].concat(h.map(r=>cols.map(c=>{const v=r[c]??"";return /[",]/.test(v)?`"${v}"`:v;}).join(",")));
+  // Header matches recovery_log.csv exactly so the file merges into the Mac log with no reshaping.
+  // Left col = recovery_log.csv name, right = internal record key.
+  const map=[["date","date"],["time","time"],["posture","posture"],["strap","strap"],
+    ["settle_s","settle_s"],["duration_s","duration_s"],["rhr_bpm","rhr"],["rmssd_ms","rmssd"],
+    ["sdnn_ms","sdnn"],["ln_rmssd","ln"],["hrv_scaled","hrv"],["rr_total","rr_total"],
+    ["rr_clean","rr_clean"],["artifact_pct","artifact_pct"],["synthetic_pct","synthetic_pct"],
+    ["quality","quality"],["sleep_hours","sleep_hours"],["sleep_quality","sleep_quality"],
+    ["soreness","soreness"],["feeling","feeling"],["readiness","readiness"],
+    ["morpheus_hrv","morpheus_hrv"],["morpheus_recovery","morpheus_recovery"],["notes","notes"]];
+  const header=map.map(m=>m[0]).join(",");
+  const lines=[header].concat(h.map(r=>map.map(m=>{const v=r[m[1]]??"";return /[",]/.test(String(v))?`"${v}"`:v;}).join(",")));
   const blob=new Blob([lines.join("\n")],{type:"text/csv"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-  a.download="nxstech_browser_readings.csv"; a.click();
+  a.download="nxstech_phone_readings.csv"; a.click();
 }
 
 function parseCSVLine(line){
